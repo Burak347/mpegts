@@ -1,0 +1,91 @@
+
+#include "t2interface_config.h"
+#include <fstream>      // std::ifstream, std::ofstream
+#include "main.h"
+using namespace std;
+
+
+using namespace  dvbt2ll;
+//FEC blocks---->TI------>TIBlocks------>T2------>superframes
+
+void main() {
+
+	
+	ofstream outfile("preambleiq.bin", ofstream::binary);
+	if(!outfile)
+	{
+		cout << ("Dosya Açilamadi") << endl;
+		return;
+	}
+
+	int fecblocks=1, tsrate=1e6; //transport stream bit rate
+	
+	bbheaderbch_bb_impl			bbheaderbch(framesize, coderate, inputmode, inband, fecblocks, tsrate); // fecblock:0 padding & inband_type_b
+
+	
+	dvbt2_interleaver_bb_impl   bitinterleaver(framesize, coderate, modulation);
+
+	dvbt2_modulator_bc_impl     modulator(framesize, modulation, rotation);
+
+	int numdatasyms=18; float vclip=2.0;//bir T2'de kac sembol var: 18 data sembolu gidiyore + P2 sembollleri, 64K/2/2K-->16 symbol + pilots =18
+	dvbt2_p1insertion_cc_impl	preamble(carriermode, fftsize,guardint, numdatasyms, preambletype,showlvls,	vclip);
+	gr_complex *preamblesymbol = new gr_complex[2048]();
+	preamble.general_work(preamble.blocksize, (uint8_t*)preamblesymbol);
+	outfile.write((char*)preamblesymbol, 2048 * 2 * 4); outfile.close();
+
+	int tiblocks = 1; 
+	int t2frames = 1;
+	dvbt2_framemapper_cc_impl   L1PrePostP2FrameMap(framesize, coderate, modulation, rotation, fecblocks, tiblocks, carriermode, fftsize, guardint, 
+		l1const, pilotpat, t2frames,numdatasyms, papr, version, preambletype, inputmode, reservedbias, l1scram, inband);
+
+
+	dvbt2_cellinterleaver_cc_impl celltimeinterleaver(framesize, modulation, fecblocks, tiblocks);
+	dvbt2_freqinterleaver_cc_impl frequncyinterleaver(carriermode, fftsize, pilotpat, guardint, numdatasyms, papr, version, preambletype);
+
+	dvbt2_miso_cc_impl miso(carriermode, fftsize,pilotpat,guardint,numdatasyms,papr);
+
+	unsigned int vlength=2048; //output vector length.
+	
+	dvbt2_pilotgenerator_cc_impl pilotOFDM(carriermode, fftsize, pilotpat, guardint, numdatasyms, papr, version, preambletype, misogrp, equalz, bandwdth, vlength);
+
+
+
+	int i, inputbytesize = (bbheaderbch.inputsize / 8 )*(1+1/188.0);
+	uint8_t *videots	= new uint8_t[inputbytesize](); 
+
+	for (i = 0; i < inputbytesize; i++) {
+		if (i % 188) { videots[i] = i; }
+		else {
+				videots[i] = 0x47;
+			}
+	}
+
+
+	uint8_t *fecout		= new uint8_t[bbheaderbch.blocksize]();
+	uint8_t *intout		= new uint8_t[bitinterleaver.blocksize]();
+	gr_complex *modout	= new gr_complex[modulator.blocksize*fecblocks]();
+	gr_complex *tiiout  = new gr_complex[celltimeinterleaver.blocksize]();
+	gr_complex *frmout  = new gr_complex[L1PrePostP2FrameMap.blocksize]();
+	gr_complex *fiiout  = new gr_complex[frequncyinterleaver.blocksize]();
+	gr_complex *ofdout  = new gr_complex[pilotOFDM.blocksize*2048]();
+
+
+	for (int k = 0; k < 1000; k++)
+	{
+		gr_complex *modout32 = modout;
+		for (i = 0; i < fecblocks; i++) {
+			bbheaderbch.general_work(bbheaderbch.blocksize, videots, fecout); //BCH&LDPC, Header + Sync+ Pad								 B:310 msec
+			bitinterleaver.general_work(bitinterleaver.blocksize, fecout, intout);//fec interleave & symbol									 B:360 msec
+			modulator.general_work(modulator.blocksize, intout, (uint8_t*)modout32);// iq map												 B:380 msec
+			modout32 += modulator.blocksize;
+		}
+		
+		celltimeinterleaver.general_work(celltimeinterleaver.blocksize, (uint8_t*)modout, (uint8_t*)tiiout);//cell interleave				586 msec
+		L1PrePostP2FrameMap.general_work(L1PrePostP2FrameMap.blocksize, (uint8_t*)tiiout, (uint8_t*)frmout);//L1 + P2 + Data				850 msec
+		frequncyinterleaver.general_work(frequncyinterleaver.blocksize, (uint8_t*)frmout, (uint8_t*)fiiout);//freq interlave				1000
+		pilotOFDM.general_work(pilotOFDM.blocksize, (uint8_t*)fiiout, (uint8_t*)ofdout); //Pilot inject , IFFT								1350 msec: 250 msec FFT
+		
+	
+	}																											
+	return ;
+}
